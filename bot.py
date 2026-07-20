@@ -1,11 +1,12 @@
 import os
 import sqlite3
+import requests
 import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 DB_PATH = os.path.join(os.environ.get("DATA_DIR", "."), "shortbot.db")
-THRESHOLDS = [10, 20]
+THRESHOLDS = [10, 20]  # percent moves to alert on, upward only
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -13,7 +14,54 @@ def get_conn():
         chat_id INTEGER, ticker TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS up_alerts (
         chat_id INTEGER, ticker TEXT, threshold REAL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sec_seen (
+        ticker TEXT PRIMARY KEY, accession TEXT)""")
     return conn
+
+_CIK_CACHE = {}
+
+def get_cik(ticker: str):
+    global _CIK_CACHE
+    if not _CIK_CACHE:
+        try:
+            resp = requests.get(
+                "https://www.sec.gov/files/company_tickers.json",
+                headers={"User-Agent": "shortbot contact@example.com"},
+                timeout=10,
+            )
+            data = resp.json()
+            for entry in data.values():
+                _CIK_CACHE[entry["ticker"].upper()] = str(entry["cik_str"]).zfill(10)
+        except Exception:
+            return None
+    return _CIK_CACHE.get(ticker.upper())
+
+def get_recent_filings(ticker: str, limit: int = 1):
+    cik = get_cik(ticker)
+    if not cik:
+        return []
+    try:
+        resp = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers={"User-Agent": "shortbot contact@example.com"},
+            timeout=10,
+        )
+        recent = resp.json().get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+        docs = recent.get("primaryDocument", [])
+        filings = []
+        for i in range(min(limit, len(forms))):
+            acc_nodash = accessions[i].replace("-", "")
+            link = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_nodash}/{docs[i]}"
+            filings.append({
+                "form": forms[i], "date": dates[i],
+                "accession": accessions[i], "link": link,
+            })
+        return filings
+    except Exception:
+        return []
 
 def get_price(ticker: str):
     data = yf.Ticker(ticker).history(period="1d")
@@ -38,7 +86,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unwatch TICKER - remove from watchlist\n"
         "/list - show watchlist with current prices\n"
         "/price TICKER - check a price on demand\n\n"
-        "You'll only be alerted on upward moves of 10% or 20%+."
+        "You'll only be alerted on upward moves of 10% or 20%+.\n"
+        "SEC filings for anything on your watchlist are sent automatically."
     )
 
 async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,6 +172,34 @@ async def check_up_alerts(context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
     conn.close()
 
+async def check_sec_filings(context: ContextTypes.DEFAULT_TYPE):
+    conn = get_conn()
+    tickers = conn.execute("SELECT DISTINCT ticker FROM watchlist").fetchall()
+    for (ticker,) in tickers:
+        filings = get_recent_filings(ticker, limit=1)
+        if not filings:
+            continue
+        latest = filings[0]
+        seen = conn.execute("SELECT accession FROM sec_seen WHERE ticker=?", (ticker,)).fetchone()
+        if seen is None:
+            conn.execute("INSERT INTO sec_seen VALUES (?, ?)", (ticker, latest["accession"]))
+            conn.commit()
+            continue
+        if seen[0] != latest["accession"]:
+            conn.execute(
+                "UPDATE sec_seen SET accession=? WHERE ticker=?", (latest["accession"], ticker)
+            )
+            conn.commit()
+            chat_ids = conn.execute(
+                "SELECT chat_id FROM watchlist WHERE ticker=?", (ticker,)
+            ).fetchall()
+            for (chat_id,) in chat_ids:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"New SEC filing: {ticker} filed a {latest['form']} on {latest['date']}\n{latest['link']}"
+                )
+    conn.close()
+
 app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("watch", watch))
@@ -131,5 +208,6 @@ app.add_handler(CommandHandler("list", list_watchlist))
 app.add_handler(CommandHandler("price", price))
 
 app.job_queue.run_repeating(check_up_alerts, interval=300, first=10)
+app.job_queue.run_repeating(check_sec_filings, interval=1800, first=20)
 
 app.run_polling()
