@@ -43,25 +43,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /watch TICKER")
+        await update.message.reply_text("Usage: /watch TICKER [TICKER2 TICKER3 ...]")
         return
-    ticker = context.args[0].upper()
     chat_id = update.effective_chat.id
     conn = get_conn()
-    existing = conn.execute(
-        "SELECT 1 FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
-    ).fetchone()
-    if existing:
-        await update.message.reply_text(f"{ticker} is already on your watchlist.")
-    else:
+    added, skipped = [], []
+    for raw in context.args:
+        ticker = raw.upper()
+        existing = conn.execute(
+            "SELECT 1 FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
+        ).fetchone()
+        if existing:
+            skipped.append(ticker)
+            continue
         conn.execute("INSERT INTO watchlist VALUES (?, ?)", (chat_id, ticker))
         for t in THRESHOLDS:
             conn.execute("INSERT INTO up_alerts VALUES (?, ?, ?)", (chat_id, ticker, t))
-        conn.commit()
-        await update.message.reply_text(
-            f"Added {ticker}. You'll be alerted at +{THRESHOLDS[0]}% and +{THRESHOLDS[1]}%."
-        )
+        added.append(ticker)
+    conn.commit()
     conn.close()
+    lines = []
+    if added:
+        lines.append(f"Added: {', '.join(added)} (alerts at +{THRESHOLDS[0]}% and +{THRESHOLDS[1]}%)")
+    if skipped:
+        lines.append(f"Already watching: {', '.join(skipped)}")
+    await update.message.reply_text("\n".join(lines))
 
 async def unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
