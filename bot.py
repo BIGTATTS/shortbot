@@ -13,9 +13,14 @@ def get_conn():
     conn.execute("""CREATE TABLE IF NOT EXISTS watchlist (
         chat_id INTEGER, ticker TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS up_alerts (
-        chat_id INTEGER, ticker TEXT, threshold REAL, direction TEXT DEFAULT 'up')""")
+        chat_id INTEGER, ticker TEXT, threshold REAL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS sec_seen (
         ticker TEXT PRIMARY KEY, accession TEXT)""")
+    try:
+        conn.execute("ALTER TABLE up_alerts ADD COLUMN direction TEXT DEFAULT 'up'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 _CIK_CACHE = {}
