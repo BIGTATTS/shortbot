@@ -5,8 +5,26 @@ import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import redis as redis_lib
+
 DB_PATH = os.path.join(os.environ.get("DATA_DIR", "."), "shortbot.db")
 THRESHOLDS = [10, 20]  # percent moves to alert on, upward only
+
+try:
+    redis_client = redis_lib.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    redis_client.ping()
+except Exception:
+    redis_client = None
+
+async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
+    if redis_client is None:
+        return
+    try:
+        redis_client.set("heartbeat:shortbot", datetime.now(ZoneInfo("UTC")).isoformat(), ex=600)
+    except Exception:
+        pass
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -281,6 +299,7 @@ app.add_handler(CommandHandler("list", list_watchlist))
 app.add_handler(CommandHandler("price", price))
 
 app.job_queue.run_repeating(check_up_alerts, interval=300, first=10)
+app.job_queue.run_repeating(heartbeat_job, interval=120, first=5)
 app.job_queue.run_repeating(check_sec_filings, interval=1800, first=20)
 
 app.run_polling()
