@@ -83,6 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "VKC Short Bot\n\n"
         "Commands:\n"
         "/watch TICKER - add to watchlist (auto-alerts at +10% and +20%)\n"
+        "/setthresholds TICKER 15 30 - set custom alert levels for one ticker\n"
         "/unwatch TICKER - remove from watchlist\n"
         "/list - show watchlist with current prices\n"
         "/price TICKER - check a price on demand\n\n"
@@ -117,7 +118,30 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if skipped:
         lines.append(f"Already watching: {', '.join(skipped)}")
     await update.message.reply_text("\n".join(lines))
-
+async def setthresholds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setthresholds TICKER 15 30   (any number of thresholds)")
+        return
+    ticker = context.args[0].upper()
+    try:
+        thresholds = [float(t) for t in context.args[1:]]
+    except ValueError:
+        await update.message.reply_text("Thresholds must be numbers, e.g. /setthresholds TICKER 15 30")
+        return
+    chat_id = update.effective_chat.id
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT 1 FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
+    ).fetchone()
+    if not existing:
+        conn.execute("INSERT INTO watchlist VALUES (?, ?)", (chat_id, ticker))
+    conn.execute("DELETE FROM up_alerts WHERE chat_id=? AND ticker=?", (chat_id, ticker))
+    for t in thresholds:
+        conn.execute("INSERT INTO up_alerts VALUES (?, ?, ?)", (chat_id, ticker, t))
+    conn.commit()
+    conn.close()
+    threshold_list = ", ".join(f"+{t}%" for t in sorted(thresholds))
+    await update.message.reply_text(f"{ticker} alerts set to: {threshold_list}")
 async def unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /unwatch TICKER")
@@ -203,6 +227,7 @@ async def check_sec_filings(context: ContextTypes.DEFAULT_TYPE):
 app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("watch", watch))
+app.add_handler(CommandHandler("setthresholds", setthresholds))
 app.add_handler(CommandHandler("unwatch", unwatch))
 app.add_handler(CommandHandler("list", list_watchlist))
 app.add_handler(CommandHandler("price", price))
