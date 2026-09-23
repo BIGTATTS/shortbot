@@ -13,7 +13,7 @@ def get_conn():
     conn.execute("""CREATE TABLE IF NOT EXISTS watchlist (
         chat_id INTEGER, ticker TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS up_alerts (
-        chat_id INTEGER, ticker TEXT, threshold REAL)""")
+        chat_id INTEGER, ticker TEXT, threshold REAL, direction TEXT DEFAULT 'up')""")
     conn.execute("""CREATE TABLE IF NOT EXISTS sec_seen (
         ticker TEXT PRIMARY KEY, accession TEXT)""")
     return conn
@@ -83,7 +83,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "VKC Short Bot\n\n"
         "Commands:\n"
         "/watch TICKER - add to watchlist (auto-alerts at +10% and +20%)\n"
-        "/setthresholds TICKER 15 30 - set custom alert levels for one ticker\n"
+        "/setthresholds TICKER 15 30 - set custom upside alert levels for one ticker\n"
+        "/downside TICKER 15 30 - set alerts for a DROP of that size\n"
         "/unwatch TICKER - remove from watchlist\n"
         "/list - show watchlist with current prices\n"
         "/price TICKER - check a price on demand\n\n"
@@ -108,7 +109,10 @@ async def watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         conn.execute("INSERT INTO watchlist VALUES (?, ?)", (chat_id, ticker))
         for t in THRESHOLDS:
-            conn.execute("INSERT INTO up_alerts VALUES (?, ?, ?)", (chat_id, ticker, t))
+            conn.execute(
+                "INSERT INTO up_alerts (chat_id, ticker, threshold, direction) VALUES (?, ?, ?, 'up')",
+                (chat_id, ticker, t),
+            )
         added.append(ticker)
     conn.commit()
     conn.close()
@@ -137,11 +141,41 @@ async def setthresholds(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.execute("INSERT INTO watchlist VALUES (?, ?)", (chat_id, ticker))
     conn.execute("DELETE FROM up_alerts WHERE chat_id=? AND ticker=?", (chat_id, ticker))
     for t in thresholds:
-        conn.execute("INSERT INTO up_alerts VALUES (?, ?, ?)", (chat_id, ticker, t))
+        conn.execute(
+            "INSERT INTO up_alerts (chat_id, ticker, threshold, direction) VALUES (?, ?, ?, 'up')",
+            (chat_id, ticker, t),
+        )
     conn.commit()
     conn.close()
     threshold_list = ", ".join(f"+{t}%" for t in sorted(thresholds))
     await update.message.reply_text(f"{ticker} alerts set to: {threshold_list}")
+async def downside(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /downside TICKER 15 30   (alerts on a DROP of that size)")
+        return
+    ticker = context.args[0].upper()
+    try:
+        thresholds = [float(t) for t in context.args[1:]]
+    except ValueError:
+        await update.message.reply_text("Thresholds must be numbers, e.g. /downside TICKER 15")
+        return
+    chat_id = update.effective_chat.id
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT 1 FROM watchlist WHERE chat_id=? AND ticker=?", (chat_id, ticker)
+    ).fetchone()
+    if not existing:
+        conn.execute("INSERT INTO watchlist VALUES (?, ?)", (chat_id, ticker))
+    conn.execute("DELETE FROM up_alerts WHERE chat_id=? AND ticker=? AND direction='down'", (chat_id, ticker))
+    for t in thresholds:
+        conn.execute(
+            "INSERT INTO up_alerts (chat_id, ticker, threshold, direction) VALUES (?, ?, ?, 'down')",
+            (chat_id, ticker, t),
+        )
+    conn.commit()
+    conn.close()
+    threshold_list = ", ".join(f"-{t}%" for t in sorted(thresholds))
+    await update.message.reply_text(f"{ticker} downside alerts set to: {threshold_list}")
 async def unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /unwatch TICKER")
@@ -182,15 +216,23 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_up_alerts(context: ContextTypes.DEFAULT_TYPE):
     conn = get_conn()
-    rows = conn.execute("SELECT rowid, chat_id, ticker, threshold FROM up_alerts").fetchall()
-    for rowid, chat_id, ticker, threshold in rows:
+    rows = conn.execute("SELECT rowid, chat_id, ticker, threshold, direction FROM up_alerts").fetchall()
+    for rowid, chat_id, ticker, threshold, direction in rows:
         pct, current = get_pct_change(ticker)
         if pct is None:
             continue
-        if pct >= threshold:
+        if direction == "down":
+            triggered = pct <= -threshold
+            emoji = "\U0001F53B"
+            desc = f"down {abs(pct)}% today (${current}) \u2014 crossed -{threshold}%"
+        else:
+            triggered = pct >= threshold
+            emoji = "\U0001F680"
+            desc = f"up {pct}% today (${current}) \u2014 crossed +{threshold}%"
+        if triggered:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"\U0001F680 {ticker} is up {pct}% today (${current}) \u2014 crossed +{threshold}%"
+                text=f"{emoji} {ticker} is {desc}"
             )
             conn.execute("DELETE FROM up_alerts WHERE rowid=?", (rowid,))
             conn.commit()
@@ -228,6 +270,7 @@ app = Application.builder().token(os.environ["BOT_TOKEN"]).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("watch", watch))
 app.add_handler(CommandHandler("setthresholds", setthresholds))
+app.add_handler(CommandHandler("downside", downside))
 app.add_handler(CommandHandler("unwatch", unwatch))
 app.add_handler(CommandHandler("list", list_watchlist))
 app.add_handler(CommandHandler("price", price))
