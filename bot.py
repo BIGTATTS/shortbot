@@ -26,6 +26,17 @@ async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+async def startup_notification(context: ContextTypes.DEFAULT_TYPE):
+    owner_id = os.environ.get("OWNER_CHAT_ID")
+    if not owner_id:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=int(owner_id),
+            text="\u2705 shortbot just started up"
+        )
+    except Exception:
+        pass
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS watchlist (
@@ -298,6 +309,7 @@ app.add_handler(CommandHandler("unwatch", unwatch))
 app.add_handler(CommandHandler("list", list_watchlist))
 app.add_handler(CommandHandler("price", price))
 
+app.job_queue.run_once(startup_notification, when=3)
 app.job_queue.run_repeating(check_up_alerts, interval=300, first=10)
 app.job_queue.run_repeating(heartbeat_job, interval=120, first=5)
 app.job_queue.run_repeating(check_sec_filings, interval=1800, first=20)
